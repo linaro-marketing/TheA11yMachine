@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+
+"use strict";
+
+/**
+ * Copyright (c) 2016, Ivan Enderlin and Liip
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+var URL = require("url");
+var _ = require("underscore");
+var fs = require("fs");
+var glob = require("glob");
+var http = require("http");
+var open = require("open");
+var path = require("path");
+var program = require("commander");
+
+// Define all the options, with their description and default value.
+program
+  .usage("[options]")
+  .option(
+    "-r, --root <root>",
+    "Path to the directory containing all the report directories."
+  )
+  .option("-ar, --app-root <app>", "The root of the app source code.", "/app")
+  .option(
+    "-a, --address <address>",
+    "Start an HTTP server, and listen this address.",
+    "127.0.0.1"
+  )
+  .option("-p, --port <port>", "Port the HTTP server must listen to.", 8080)
+  .option(
+    "-s, --static-output",
+    "Generate static files instead of serving them over HTTP."
+  )
+  .option("-o, --open", "Directly open the dashboard in your favorite browser.")
+  .parse(process.argv);
+
+// No address and port to compute? Then exit.
+if (!program.root) {
+  program.help();
+  process.exit(2);
+}
+
+function computeIndex() {
+  var render = _.template(
+    fs.readFileSync(program.appRoot + "/view/dashboard/index.html", {
+      encoding: "utf-8"
+    })
+  );
+
+  return render({
+    css: {
+      common: fs.readFileSync(program.appRoot + "/view/common.css", {
+        encoding: "utf-8"
+      })
+    },
+    js: {
+      allStatistics: JSON.stringify(computeAllStatistics())
+    }
+  });
+}
+
+function computeAllStatistics() {
+  var stats = [];
+
+  glob.sync(program.root + "/*/statistics.json").forEach(function(file) {
+    stats.push(
+      JSON.parse(fs.readFileSync(file, { encoding: "utf-8" })).reduce(
+        function(previous, current) {
+          return {
+            reportId: previous.reportId,
+            reportDirectory: previous.reportDirectory,
+            date: previous.date || current.date,
+            errorCount: previous.errorCount + current.errorCount,
+            warningCount: previous.warningCount + current.warningCount,
+            noticeCount: previous.noticeCount + current.noticeCount
+          };
+        },
+        {
+          reportId: path.basename(path.dirname(file)),
+          reportDirectory: path.basename(path.dirname(path.dirname(file))),
+          date: null,
+          errorCount: 0,
+          noticeCount: 0,
+          warningCount: 0
+        }
+      )
+    );
+  });
+
+  return stats;
+}
+
+// Create an HTTP server.
+if (undefined === program.staticOutput) {
+  var server = http.createServer(
+    new (function() {
+      var indexRegex = /^\/$/;
+      var reportRegex = new RegExp("^/([^/]+)/(.+)");
+
+      return function(request, response) {
+        var url = URL.parse(request.url);
+        var matches = null;
+
+        if (url.pathname.match(indexRegex)) {
+          response.writeHead(200, {
+            "Content-Type": "text/html; charset=UTF-8"
+          });
+
+          response.end(computeIndex());
+        } else if ((matches = url.pathname.match(reportRegex))) {
+          var index = program.root + "/" + matches[1] + "/" + matches[2];
+
+          fs.access(index, fs.R_OK, function(error) {
+            if (error) {
+              response.writeHead(404, { "Content-Type": "text/plain" });
+              response.end("Report not found! Sorry.");
+
+              return;
+            }
+
+            response.writeHead(200, {
+              "Content-Type": "text/html; charset=UTF-8"
+            });
+            response.end(fs.readFileSync(index));
+          });
+        } else {
+          response.writeHead(404, { "Content-Type": "text/plain" });
+          response.end("URL not found! Sorry.");
+        }
+      };
+    })()
+  );
+
+  // Listen!
+  server.listen(program.port, program.address);
+
+  console.log(
+    "Server is listening on " + program.address + ":" + program.port + "!"
+  );
+
+  if (program.open) {
+    open("http://" + program.address + ":" + program.port);
+  }
+}
+// Generate static files.
+else {
+  var dashboardIndexPath = program.root + "/index.html";
+  var dashboardIndex = fs.createWriteStream(dashboardIndexPath, {
+    flag: "w",
+    defaultEncoding: "utf8"
+  });
+  dashboardIndex.write(computeIndex());
+
+  console.log("Dashboard generated!");
+
+  if (program.open) {
+    open(dashboardIndexPath);
+  }
+}
